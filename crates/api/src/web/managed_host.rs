@@ -22,6 +22,8 @@ use askama::Template;
 use axum::Json;
 use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::response::{Html, IntoResponse, Redirect, Response};
+use carbide_utils::managed_host_display::get_memory_details;
+use carbide_utils::{ManagedHostMetadata, reason_to_user_string};
 use db::managed_host;
 use hyper::http::StatusCode;
 use itertools::Itertools;
@@ -29,11 +31,10 @@ use model::machine::{LoadSnapshotOptions, Machine, ManagedHostStateSnapshot};
 use model::{self, machine};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc};
-use utils::managed_host_display::get_memory_details;
-use utils::{ManagedHostMetadata, reason_to_user_string};
 
 use super::filters;
 use super::pagination::{self, PaginationParams};
+use super::Base;
 use crate::api::Api;
 
 const UNKNOWN: &str = "Unknown";
@@ -704,7 +705,7 @@ async fn fetch_managed_hosts_with_metadata_paginated(
     AxumState(api): AxumState<Arc<Api>>,
     include_history: bool,
     params: &PaginationParams,
-) -> eyre::Result<(pagination::PaginationInfo, Vec<utils::ManagedHostOutput>)> {
+) -> eyre::Result<(pagination::PaginationInfo, Vec<carbide_utils::ManagedHostOutput>)> {
     let all_machine_ids = api
         .find_machine_ids(tonic::Request::new(forgerpc::MachineSearchConfig {
             include_dpus: true,
@@ -734,7 +735,7 @@ async fn fetch_managed_hosts_with_metadata_paginated(
     }
 
     let managed_host_metadata = ManagedHostMetadata::lookup_from_api(all_machines, api).await;
-    let mut managed_hosts = utils::get_managed_host_output(managed_host_metadata);
+    let mut managed_hosts = carbide_utils::get_managed_host_output(managed_host_metadata);
     managed_hosts.sort_unstable_by(|h1, h2| h1.machine_id.cmp(&h2.machine_id));
     Ok((info, managed_hosts))
 }
@@ -753,8 +754,6 @@ struct ActiveFilters<'a> {
 }
 
 impl ActiveFilters<'_> {
-    /// Builds the `&key=value` pairs for active filters so pagination links
-    /// preserve the current filter state. Only non-default values are included.
     fn to_query_params(&self) -> String {
         let mut parts = Vec::new();
         if self.health_alerts != "all" {
@@ -834,3 +833,5 @@ fn mem_to_size(mem: &str) -> isize {
 fn short_state(s: &str) -> &str {
     s.split(' ').next().unwrap_or_default()
 }
+
+impl super::Base for ManagedHostShow {}

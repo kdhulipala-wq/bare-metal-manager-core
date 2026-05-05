@@ -29,6 +29,7 @@ use rpc::forge::forge_server::Forge;
 
 use super::filters;
 use super::pagination::{self, PaginationParams};
+use super::Base;
 use crate::api::Api;
 
 #[derive(Template)]
@@ -342,3 +343,6 @@ pub async fn detail(
     // TODO tmpl.domain_name = domain_name;
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
+
+impl super::Base for InterfaceShow {}
+impl super::Base for InterfaceDetail {}

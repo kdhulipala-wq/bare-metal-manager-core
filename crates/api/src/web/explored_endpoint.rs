@@ -34,6 +34,7 @@ use serde::Deserialize;
 
 use super::filters;
 use super::pagination::{self, PaginationParams};
+use super::Base;
 use crate::api::Api;
 use crate::web::action_status::{self, ActionStatus};
 
@@ -1271,3 +1272,7 @@ fn lockdown_status_to_string(status: Option<&LockdownStatus>) -> String {
         },
     }
 }
+
+impl super::Base for ExploredEndpointsShow {}
+impl super::Base for ExploredEndpointsShowPaired {}
+impl<'a> super::Base for ExploredEndpointDetail<'a> {}

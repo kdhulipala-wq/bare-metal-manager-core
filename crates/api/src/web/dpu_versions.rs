@@ -26,6 +26,7 @@ use rpc::forge as forgerpc;
 
 use super::filters;
 use super::pagination::{self, PaginatedResponse, PaginationParams};
+use super::Base;
 use crate::api::Api;
 use crate::web::machine;
 
@@ -186,3 +187,5 @@ pub async fn list_json(
     )
         .into_response()
 }
+
+impl super::Base for DpuVersions {}
