@@ -18,13 +18,14 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Path as AxumPath, State as AxumState};
+use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::response::{Html, IntoResponse, Response};
 use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc};
 
 use super::machine::ValidationRun;
+use super::pagination::{self, PaginationParams};
 use crate::api::Api;
 
 #[derive(Debug)]
@@ -115,6 +116,16 @@ struct ValidationResults {
 #[template(path = "validation_tests.html")]
 struct ValidateTests {
     validation_tests: Vec<ValidateTest>,
+    path: String,
+    current_page: usize,
+    previous: usize,
+    next: usize,
+    pages: usize,
+    page_range_start: usize,
+    page_range_end: usize,
+    limit: usize,
+    total_items: usize,
+    extra_query_params: String,
 }
 #[derive(Template)]
 #[template(path = "validation_test_details.html")]
@@ -126,11 +137,31 @@ struct ValidateTestDetailsDisplay {
 #[template(path = "validation.html")]
 struct ValidationRunDisplay {
     validation_runs: Vec<ValidationRun>,
+    path: String,
+    current_page: usize,
+    previous: usize,
+    next: usize,
+    pages: usize,
+    page_range_start: usize,
+    page_range_end: usize,
+    limit: usize,
+    total_items: usize,
+    extra_query_params: String,
 }
 #[derive(Template)]
 #[template(path = "validation_external_config.html")]
 struct ValidationExternalConfigs {
     validation_configs: Vec<ValidationExternalConfig>,
+    path: String,
+    current_page: usize,
+    previous: usize,
+    next: usize,
+    pages: usize,
+    page_range_start: usize,
+    page_range_end: usize,
+    limit: usize,
+    total_items: usize,
+    extra_query_params: String,
 }
 
 impl From<forgerpc::MachineValidationTest> for ValidateTest {
@@ -292,7 +323,10 @@ pub async fn result_details(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_tests_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub async fn show_tests_html(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> Response {
     let validate_tests = match fetch_validation_tests(state, None).await {
         Ok(tests) => tests,
         Err(err) => {
@@ -305,8 +339,21 @@ pub async fn show_tests_html(AxumState(state): AxumState<Arc<Api>>) -> Response 
         }
     };
 
+    let all_tests: Vec<ValidateTest> = validate_tests.into_iter().map(ValidateTest::from).collect();
+    let (info, validation_tests) = pagination::paginate_vec(all_tests, &params);
+
     let tmpl = ValidateTests {
-        validation_tests: validate_tests.into_iter().map(ValidateTest::from).collect(),
+        validation_tests,
+        path: "/admin/machinevalidation/tests".to_string(),
+        current_page: info.current_page,
+        previous: info.previous,
+        next: info.next,
+        pages: info.pages,
+        page_range_start: info.page_range_start,
+        page_range_end: info.page_range_end,
+        limit: info.limit,
+        total_items: info.total_items,
+        extra_query_params: String::new(),
     };
 
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
@@ -353,14 +400,16 @@ async fn fetch_validation_tests(
         .map(|response| response.into_inner().tests)
 }
 
-pub async fn runs(AxumState(state): AxumState<Arc<Api>>) -> Response {
-    // Get validation results
+pub async fn runs(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> Response {
     let validation_request = tonic::Request::new(rpc::forge::MachineValidationRunListGetRequest {
         machine_id: None,
         include_history: false,
     });
 
-    let validation_runs = match state
+    let validation_runs: Vec<ValidationRun> = match state
         .get_machine_validation_runs(validation_request)
         .await
         .map(|response| response.into_inner())
@@ -384,22 +433,38 @@ pub async fn runs(AxumState(state): AxumState<Arc<Api>>) -> Response {
             .collect(),
         Err(err) => {
             tracing::warn!(%err,"get_machine_validation_runs failed");
-            Vec::new() // Empty validation results on error
+            Vec::new()
         }
     };
 
-    let tmpl = ValidationRunDisplay { validation_runs };
+    let (info, validation_runs) = pagination::paginate_vec(validation_runs, &params);
+
+    let tmpl = ValidationRunDisplay {
+        validation_runs,
+        path: "/admin/machinevalidation/runs".to_string(),
+        current_page: info.current_page,
+        previous: info.previous,
+        next: info.next,
+        pages: info.pages,
+        page_range_start: info.page_range_start,
+        page_range_end: info.page_range_end,
+        limit: info.limit,
+        total_items: info.total_items,
+        extra_query_params: String::new(),
+    };
 
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn external_configs(AxumState(state): AxumState<Arc<Api>>) -> Response {
-    // Get validation results
+pub async fn external_configs(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> Response {
     let request = tonic::Request::new(rpc::forge::GetMachineValidationExternalConfigsRequest {
         names: Vec::new(),
     });
 
-    let validation_configs = match state
+    let validation_configs: Vec<ValidationExternalConfig> = match state
         .get_machine_validation_external_configs(request)
         .await
         .map(|response| response.into_inner())
@@ -416,11 +481,25 @@ pub async fn external_configs(AxumState(state): AxumState<Arc<Api>>) -> Response
             .collect(),
         Err(err) => {
             tracing::warn!(%err,"get_machine_validation_runs failed");
-            Vec::new() // Empty validation results on error
+            Vec::new()
         }
     };
 
-    let tmpl = ValidationExternalConfigs { validation_configs };
+    let (info, validation_configs) = pagination::paginate_vec(validation_configs, &params);
+
+    let tmpl = ValidationExternalConfigs {
+        validation_configs,
+        path: "/admin/machinevalidation/external-configs".to_string(),
+        current_page: info.current_page,
+        previous: info.previous,
+        next: info.next,
+        pages: info.pages,
+        page_range_start: info.page_range_start,
+        page_range_end: info.page_range_end,
+        limit: info.limit,
+        total_items: info.total_items,
+        extra_query_params: String::new(),
+    };
 
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }

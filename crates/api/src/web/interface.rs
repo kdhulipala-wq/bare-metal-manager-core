@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::Json;
-use axum::extract::{Path as AxumPath, State as AxumState};
+use axum::extract::{OriginalUri, Path as AxumPath, Query, State as AxumState};
 use axum::response::{Html, IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use hyper::http::StatusCode;
@@ -28,12 +28,23 @@ use rpc::forge as forgerpc;
 use rpc::forge::forge_server::Forge;
 
 use super::filters;
+use super::pagination::{self, PaginationParams};
 use crate::api::Api;
 
 #[derive(Template)]
 #[template(path = "interface_show.html")]
 struct InterfaceShow {
     interfaces: Vec<InterfaceRowDisplay>,
+    path: String,
+    current_page: usize,
+    previous: usize,
+    next: usize,
+    pages: usize,
+    page_range_start: usize,
+    page_range_end: usize,
+    limit: usize,
+    total_items: usize,
+    extra_query_params: String,
 }
 
 struct InterfaceRowDisplay {
@@ -65,7 +76,11 @@ impl From<forgerpc::MachineInterface> for InterfaceRowDisplay {
 }
 
 /// List machine interfaces
-pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub async fn show_html(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+    uri: OriginalUri,
+) -> Response {
     let machine_interfaces = match fetch_machine_interfaces(state.clone()).await {
         Ok(n) => n,
         Err(err) => {
@@ -109,11 +124,29 @@ pub async fn show_html(AxumState(state): AxumState<Arc<Api>>) -> Response {
         display.domain_name = domain_name;
         interfaces.push(display);
     }
-    let tmpl = InterfaceShow { interfaces };
+
+    let (info, interfaces) = pagination::paginate_vec(interfaces, &params);
+
+    let tmpl = InterfaceShow {
+        interfaces,
+        path: uri.path().to_string(),
+        current_page: info.current_page,
+        previous: info.previous,
+        next: info.next,
+        pages: info.pages,
+        page_range_start: info.page_range_start,
+        page_range_end: info.page_range_end,
+        limit: info.limit,
+        total_items: info.total_items,
+        extra_query_params: String::new(),
+    };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
+pub async fn show_all_json(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> Response {
     let machine_interfaces = match fetch_machine_interfaces(state).await {
         Ok(n) => n,
         Err(err) => {
@@ -125,7 +158,8 @@ pub async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
                 .into_response();
         }
     };
-    (StatusCode::OK, Json(machine_interfaces)).into_response()
+    let (info, page) = pagination::paginate_vec(machine_interfaces, &params);
+    (StatusCode::OK, Json(info.to_response(page))).into_response()
 }
 
 async fn fetch_machine_interfaces(

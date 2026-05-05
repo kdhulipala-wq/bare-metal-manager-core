@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Path as AxumPath, Query, State as AxumState};
+use axum::extract::{OriginalUri, Path as AxumPath, Query, State as AxumState};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::{Form, Json};
 use carbide_uuid::machine::{MachineId, MachineType};
@@ -32,6 +32,7 @@ use serde::Deserialize;
 use utils::managed_host_display::to_time;
 
 use super::filters;
+use super::pagination::{self, PaginationParams};
 use super::state_history::StateHistoryTable;
 use crate::api::Api;
 use crate::web::action_status::{self, ActionStatus};
@@ -41,6 +42,16 @@ use crate::web::action_status::{self, ActionStatus};
 struct MachineShow {
     title: &'static str,
     machines: Vec<MachineRowDisplay>,
+    path: String,
+    current_page: usize,
+    previous: usize,
+    next: usize,
+    pages: usize,
+    page_range_start: usize,
+    page_range_end: usize,
+    limit: usize,
+    total_items: usize,
+    extra_query_params: String,
 }
 
 #[derive(PartialEq, Eq)]
@@ -173,28 +184,42 @@ impl MachineRowDisplay {
     }
 }
 
-pub async fn show_hosts_html(state: AxumState<Arc<Api>>) -> impl IntoResponse {
-    show(state, true, false).await
+pub async fn show_hosts_html(
+    state: AxumState<Arc<Api>>,
+    query: Query<PaginationParams>,
+    path: OriginalUri,
+) -> impl IntoResponse {
+    show(state, true, false, query, path).await
 }
 
-pub async fn show_hosts_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
-    let machines = match fetch_machines(state, false, true).await {
-        Ok(m) => m,
+pub async fn show_hosts_json(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> Response {
+    let (info, machines) = match fetch_machines_paginated(state, false, true, &params).await {
+        Ok(r) => r,
         Err(err) => {
             tracing::error!(%err, "fetch_machines");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading machines").into_response();
         }
     };
-    (StatusCode::OK, Json(machines)).into_response()
+    (StatusCode::OK, Json(info.to_response(machines))).into_response()
 }
 
-pub async fn show_dpus_html(state: AxumState<Arc<Api>>) -> impl IntoResponse {
-    show(state, false, true).await
+pub async fn show_dpus_html(
+    state: AxumState<Arc<Api>>,
+    query: Query<PaginationParams>,
+    path: OriginalUri,
+) -> impl IntoResponse {
+    show(state, false, true, query, path).await
 }
 
-pub async fn show_dpus_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
-    let mut machines = match fetch_machines(state, true, true).await {
-        Ok(m) => m,
+pub async fn show_dpus_json(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> Response {
+    let (info, mut machines) = match fetch_machines_paginated(state, true, true, &params).await {
+        Ok(r) => r,
         Err(err) => {
             tracing::error!(%err, "fetch_machines");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading machines").into_response();
@@ -203,29 +228,38 @@ pub async fn show_dpus_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
     machines
         .machines
         .retain(|m| m.machine_type == forgerpc::MachineType::Dpu as i32);
-    (StatusCode::OK, Json(machines)).into_response()
+    (StatusCode::OK, Json(info.to_response(machines))).into_response()
 }
 
 /// List machines
-pub async fn show_all_html(state: AxumState<Arc<Api>>) -> impl IntoResponse {
-    show(state, true, true).await
+pub async fn show_all_html(
+    state: AxumState<Arc<Api>>,
+    query: Query<PaginationParams>,
+    path: OriginalUri,
+) -> impl IntoResponse {
+    show(state, true, true, query, path).await
 }
 
-pub async fn show_all_json(AxumState(state): AxumState<Arc<Api>>) -> Response {
-    let machines = match fetch_machines(state, true, true).await {
-        Ok(m) => m,
+pub async fn show_all_json(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> Response {
+    let (info, machines) = match fetch_machines_paginated(state, true, true, &params).await {
+        Ok(r) => r,
         Err(err) => {
             tracing::error!(%err, "fetch_machines");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error loading machines").into_response();
         }
     };
-    (StatusCode::OK, Json(machines)).into_response()
+    (StatusCode::OK, Json(info.to_response(machines))).into_response()
 }
 
 async fn show(
     AxumState(state): AxumState<Arc<Api>>,
     include_hosts: bool,
     include_dpus: bool,
+    Query(params): Query<PaginationParams>,
+    uri: OriginalUri,
 ) -> Response {
     let all_machines = match fetch_machines(state.clone(), include_dpus, false).await {
         Ok(m) => m,
@@ -235,16 +269,6 @@ async fn show(
         }
     };
 
-    // Should we show this machine? Since we need to use this
-    // twice, make a closure out of it. Previously, we created
-    // looped over `all_machines` to create `machines` as mut,
-    // and then iter_mut'd over `machines` again to set the
-    // instance_type (name). We no longer use mut, but we still
-    // need to loop twice -- once to collect all of the instance
-    // type IDs the included list of machines, and then again to
-    // actually build `machines`. Maybe it was better to just
-    // leave `machines` as mut in this case, but hey this is
-    // where we are.
     let should_show_machine =
         |m: &forgerpc::Machine| match forgerpc::MachineType::try_from(m.machine_type) {
             Ok(forgerpc::MachineType::Host) => include_hosts,
@@ -252,9 +276,6 @@ async fn show(
             _ => false,
         };
 
-    // Populate all of the included instance_type_ids by going
-    // over all machines. If it's a machine we should show, and
-    // the ID isn't empty, include it.
     let instance_type_ids: Vec<String> = all_machines
         .machines
         .iter()
@@ -269,19 +290,12 @@ async fn show(
         .into_iter()
         .collect();
 
-    // And now pass all of the instance_type_ids to our name
-    // fetcher, which takes all of the IDs we care about.
     let instance_types = match fetch_instance_type_names(&state, instance_type_ids).await {
         Ok(instance_types) => instance_types,
         Err(e) => return e,
     };
 
-    // And NOW go over all of the machines we should show,
-    // setting the correct instance type on the machine.
-    // I added support for constructing a new MachineRowDisplay
-    // with an instance_type here so we didn't need to deal
-    // with it being mut (and retroactively populating it).
-    let machines: Vec<MachineRowDisplay> = all_machines
+    let all_display: Vec<MachineRowDisplay> = all_machines
         .machines
         .into_iter()
         .filter(should_show_machine)
@@ -297,6 +311,8 @@ async fn show(
         .sorted()
         .collect();
 
+    let (info, machines) = pagination::paginate_vec(all_display, &params);
+
     let tmpl = MachineShow {
         machines,
         title: if include_hosts && include_dpus {
@@ -306,6 +322,16 @@ async fn show(
         } else {
             "DPUs"
         },
+        path: uri.path().to_string(),
+        current_page: info.current_page,
+        previous: info.previous,
+        next: info.next,
+        pages: info.pages,
+        page_range_start: info.page_range_start,
+        page_range_end: info.page_range_end,
+        limit: info.limit,
+        total_items: info.total_items,
+        extra_query_params: String::new(),
     };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
@@ -423,6 +449,49 @@ pub async fn fetch_machines(
     }
 
     Ok(forgerpc::MachineList { machines })
+}
+
+/// Paginated version of `fetch_machines`. Fetches all matching IDs, slices to
+/// the requested page, then batch-fetches only that page's machine details.
+async fn fetch_machines_paginated(
+    api: Arc<Api>,
+    include_dpus: bool,
+    include_history: bool,
+    params: &PaginationParams,
+) -> Result<(pagination::PaginationInfo, forgerpc::MachineList), tonic::Status> {
+    let request = tonic::Request::new(forgerpc::MachineSearchConfig {
+        include_dpus,
+        include_predicted_host: true,
+        ..Default::default()
+    });
+
+    let all_ids = api
+        .find_machine_ids(request)
+        .await?
+        .into_inner()
+        .machine_ids;
+
+    let (info, page_ids) = pagination::paginate_ids(&all_ids, params);
+
+    let mut machines = Vec::new();
+    let mut offset = 0;
+    while offset != page_ids.len() {
+        const BATCH_SIZE: usize = 100;
+        let batch_size = BATCH_SIZE.min(page_ids.len() - offset);
+        let next_ids = &page_ids[offset..offset + batch_size];
+        let next_machines = api
+            .find_machines_by_ids(tonic::Request::new(forgerpc::MachinesByIdsRequest {
+                machine_ids: next_ids.to_vec(),
+                include_history,
+            }))
+            .await?
+            .into_inner();
+
+        machines.extend(next_machines.machines.into_iter());
+        offset += batch_size;
+    }
+
+    Ok((info, forgerpc::MachineList { machines }))
 }
 
 #[derive(Template)]

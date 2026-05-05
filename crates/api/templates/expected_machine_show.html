@@ -52,7 +52,7 @@
 <div id="json" {% if active_tab != "all" %}style="display:none;"{% endif %}>
 	<a href="/admin/expected-machine-definition.json">JSON</a>
 </div>
-<h1>Expected Machines</h1>
+<h1>Expected Machines ({{ total_items }})</h1>
 
 <!-- Tab Navigation -->
 <div class="tab-nav">
@@ -117,6 +117,8 @@
 	</table>
 </div>
 
+{% include "pages_footer.html" %}
+
 {% endblock %}
 
 {% block script %}
@@ -141,4 +143,3 @@ document.addEventListener('DOMContentLoaded', function() {
 	});
 });
 {% endblock %}
-

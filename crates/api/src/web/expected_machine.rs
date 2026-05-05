@@ -25,6 +25,7 @@ use axum::response::{Html, IntoResponse, Response};
 use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 
+use super::pagination::{self, PaginationParams};
 use crate::api::Api;
 use crate::web::filters;
 
@@ -44,6 +45,16 @@ struct ExpectedMachines {
     unlinked_count: usize,
     unexpected_count: usize,
     active_tab: String,
+    path: String,
+    current_page: usize,
+    previous: usize,
+    next: usize,
+    pages: usize,
+    page_range_start: usize,
+    page_range_end: usize,
+    limit: usize,
+    total_items: usize,
+    extra_query_params: String,
 }
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, serde::Serialize)]
@@ -151,15 +162,21 @@ impl ExpectedMachineTabs {
 
 pub async fn show_all_html(
     AxumState(api): AxumState<Arc<Api>>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(mut params): Query<HashMap<String, String>>,
 ) -> Response {
     let active_tab = params
-        .get("tab")
-        .cloned()
+        .remove("tab")
         .unwrap_or_else(|| "all".to_string());
     if !TABS.contains(&active_tab.as_str()) {
         return (StatusCode::BAD_REQUEST, "Unknown tab").into_response();
     }
+
+    let pagination_params = PaginationParams {
+        current_page: params
+            .remove("current_page")
+            .and_then(|s| s.parse().ok()),
+        limit: params.remove("limit").and_then(|s| s.parse().ok()),
+    };
 
     let result = match api
         .get_all_expected_machines_linked(tonic::Request::new(()))
@@ -207,12 +224,54 @@ pub async fn show_all_html(
     unexpected_machines.sort_unstable();
     let unexpected_count = unexpected_machines.len();
 
+    let active_tab_total = match active_tab.as_str() {
+        "all" => all_count,
+        "completed" => completed_count,
+        "unseen" => unseen_count,
+        "unexplored" => unexplored_count,
+        "unlinked" => unlinked_count,
+        "unexpected" => unexpected_count,
+        _ => 0,
+    };
+
+    let (info, _) = pagination::paginate_vec(
+        vec![0u8; active_tab_total],
+        &pagination_params,
+    );
+
+    let paginate_tab = |items: Vec<ExpectedMachineRow>, tab: &str| -> Vec<ExpectedMachineRow> {
+        if tab == active_tab {
+            let (_, paginated) = pagination::paginate_vec(items, &pagination_params);
+            paginated
+        } else {
+            items
+        }
+    };
+
+    let all_machines = paginate_tab(expected_tabs.all_machines, "all");
+    let completed_machines = paginate_tab(expected_tabs.completed_machines, "completed");
+    let unseen_machines = paginate_tab(expected_tabs.unseen_machines, "unseen");
+    let unexplored_machines = paginate_tab(expected_tabs.unexplored_machines, "unexplored");
+    let unlinked_machines = paginate_tab(expected_tabs.unlinked_machines, "unlinked");
+    let unexpected_machines = if active_tab == "unexpected" {
+        let (_, paginated) = pagination::paginate_vec(unexpected_machines, &pagination_params);
+        paginated
+    } else {
+        unexpected_machines
+    };
+
+    let extra_query_params = if active_tab != "all" {
+        format!("&tab={active_tab}")
+    } else {
+        String::new()
+    };
+
     let tmpl = ExpectedMachines {
-        all_machines: expected_tabs.all_machines,
-        completed_machines: expected_tabs.completed_machines,
-        unseen_machines: expected_tabs.unseen_machines,
-        unexplored_machines: expected_tabs.unexplored_machines,
-        unlinked_machines: expected_tabs.unlinked_machines,
+        all_machines,
+        completed_machines,
+        unseen_machines,
+        unexplored_machines,
+        unlinked_machines,
         unexpected_machines,
         all_count,
         completed_count,
@@ -221,6 +280,16 @@ pub async fn show_all_html(
         unlinked_count,
         unexpected_count,
         active_tab,
+        path: "/admin/expected-machine".to_string(),
+        current_page: info.current_page,
+        previous: info.previous,
+        next: info.next,
+        pages: info.pages,
+        page_range_start: info.page_range_start,
+        page_range_end: info.page_range_end,
+        limit: info.limit,
+        total_items: info.total_items,
+        extra_query_params,
     };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }

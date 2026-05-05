@@ -47,6 +47,7 @@ struct ComputeAllocationShow {
     page_range_start: usize,
     page_range_end: usize,
     limit: usize,
+    extra_query_params: String,
 }
 
 #[derive(PartialEq, Eq)]
@@ -166,6 +167,7 @@ pub async fn show(
         page_range_start: current_page.saturating_sub(3),
         page_range_end: min(current_page.saturating_add(4), pages),
         limit,
+        extra_query_params: String::new(),
     };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }

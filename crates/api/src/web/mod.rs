@@ -177,6 +177,7 @@ mod network_device;
 mod network_security_group;
 mod network_segment;
 mod network_status;
+pub(crate) mod pagination;
 mod nmxm_browser;
 mod nvlink;
 mod operating_system;

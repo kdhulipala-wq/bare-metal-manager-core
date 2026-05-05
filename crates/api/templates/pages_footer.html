@@ -1,9 +1,9 @@
 <table>
     <tr><th>
 {% if pages > 1 %}
-<a href="{{ path }}?current_page=0&limit={{limit}}">[&lt; First]</a>
+<a href="{{ path }}?current_page=0&limit={{limit}}{{extra_query_params}}">[&lt; First]</a>
 {% if current_page > 0 %}
-    <a href="{{ path }}?current_page={{previous}}&limit={{limit}}">[&lt;&lt; Previous]</a>
+    <a href="{{ path }}?current_page={{previous}}&limit={{limit}}{{extra_query_params}}">[&lt;&lt; Previous]</a>
 {% else %}
     [&lt;&lt; Previous]
 {% endif %}
@@ -13,11 +13,11 @@
     [Last &gt;]
 {% else%}
     {% if current_page < (pages-1) %}
-        <a href="{{ path }}?current_page={{next}}&limit={{limit}}">[Next &gt;&gt;]</a>
+        <a href="{{ path }}?current_page={{next}}&limit={{limit}}{{extra_query_params}}">[Next &gt;&gt;]</a>
     {% else %}
         [Next &gt;&gt;]
     {% endif %}
-    <a href="{{ path }}?current_page={{(pages - 1)}}&limit={{limit}}">[Last &gt;]</a>
+    <a href="{{ path }}?current_page={{(pages - 1)}}&limit={{limit}}{{extra_query_params}}">[Last &gt;]</a>
 {% endif %}
 
 <br/>
@@ -26,7 +26,7 @@ Page: ...
         {% if p == current_page %}
             [{{p}}]
         {% else %}
-            <a href="{{ path }}?current_page={{p}}&limit={{limit}}">[{{p}}]</a> 
+            <a href="{{ path }}?current_page={{p}}&limit={{limit}}{{extra_query_params}}">[{{p}}]</a> 
         {% endif %}
     {% endfor %}
 ...

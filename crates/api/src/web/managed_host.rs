@@ -33,6 +33,7 @@ use utils::managed_host_display::get_memory_details;
 use utils::{ManagedHostMetadata, reason_to_user_string};
 
 use super::filters;
+use super::pagination::{self, PaginationParams};
 use crate::api::Api;
 
 const UNKNOWN: &str = "Unknown";
@@ -59,6 +60,16 @@ struct ManagedHostShow {
     mems: Vec<(isize, String)>,
     active_mem_filter: isize,
     is_filtered: bool,
+    path: String,
+    current_page: usize,
+    previous: usize,
+    next: usize,
+    pages: usize,
+    page_range_start: usize,
+    page_range_end: usize,
+    limit: usize,
+    total_items: usize,
+    extra_query_params: String,
 }
 
 struct GroupedHosts {
@@ -429,6 +440,13 @@ pub async fn show_html(
     let group_by_param = params.remove("group-by").unwrap_or("none".to_string());
     let group_by = GroupingKey::params_to_vec(&group_by_param);
 
+    let pagination_params = PaginationParams {
+        current_page: params
+            .remove("current_page")
+            .and_then(|s| s.parse().ok()),
+        limit: params.remove("limit").and_then(|s| s.parse().ok()),
+    };
+
     let mut hosts = Vec::new();
     let mut models_per_vendor: HashMap<String, Vec<String>> = HashMap::new();
     let mut states = HashSet::new();
@@ -513,6 +531,16 @@ pub async fn show_html(
 
     hosts.sort_unstable();
 
+    let grouped_hosts = group_hosts(&hosts, &group_by);
+
+    // Paginate the filtered result set (only for individual view, not grouped).
+    let (info, hosts) = if grouped_hosts.is_some() {
+        let info = pagination::paginate_vec(Vec::<ManagedHostRowDisplay>::new(), &PaginationParams::default());
+        (info.0, hosts)
+    } else {
+        pagination::paginate_vec(hosts, &pagination_params)
+    };
+
     let vendors: Vec<String> = models_per_vendor
         .keys()
         .cloned()
@@ -558,8 +586,22 @@ pub async fn show_html(
         || active_ib_filter != "all"
         || active_mem_filter != -1;
 
+    let extra_query_params = ActiveFilters {
+        health_alerts: &active_health_alerts_filter,
+        maintenance: &active_maintenance_filter,
+        vendor: &active_vendor_filter,
+        model: &active_model_filter,
+        state: &active_state_filter,
+        gpu: &active_gpu_filter,
+        ib: &active_ib_filter,
+        mem: active_mem_filter,
+        time_in_state_above_sla: &active_time_in_state_above_sla_filter,
+        group_by: &group_by_param,
+    }
+    .to_query_params();
+
     let tmpl = ManagedHostShow {
-        grouped_hosts: group_hosts(&hosts, &group_by),
+        grouped_hosts,
         active_group_by: GroupingKey::vec_to_params(&group_by),
         active_health_alerts_filter,
         active_maintenance_filter,
@@ -578,6 +620,16 @@ pub async fn show_html(
         mems,
         active_mem_filter,
         is_filtered,
+        path: "/admin/managed-host".to_string(),
+        current_page: info.current_page,
+        previous: info.previous,
+        next: info.next,
+        pages: info.pages,
+        page_range_start: info.page_range_start,
+        page_range_end: info.page_range_end,
+        limit: info.limit,
+        total_items: info.total_items,
+        extra_query_params,
     };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
@@ -627,30 +679,33 @@ fn filter_expr(keys: &[GroupingKey], values: &[String]) -> String {
         .join("&")
 }
 
-pub async fn show_all_json(state: AxumState<Arc<Api>>) -> Response {
-    let mut managed_hosts = match fetch_managed_hosts_with_metadata(state, true).await {
-        Ok(m) => m,
-        Err(err) => {
-            tracing::error!(%err, "fetch_managed_hosts");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Error loading managed hosts",
-            )
-                .into_response();
-        }
-    };
-    managed_hosts.sort_unstable_by(|h1, h2| h1.machine_id.cmp(&h2.machine_id));
-    (StatusCode::OK, Json(managed_hosts)).into_response()
+pub async fn show_all_json(
+    state: AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> Response {
+    let (info, managed_hosts) =
+        match fetch_managed_hosts_with_metadata_paginated(state, true, &params).await {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::error!(%err, "fetch_managed_hosts");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Error loading managed hosts",
+                )
+                    .into_response();
+            }
+        };
+    (StatusCode::OK, Json(info.to_response(managed_hosts))).into_response()
 }
 
-/// Get all managed hosts, with expensive metadata like connected network devices, using information
-/// from site explorer, redfish, etc. This is a very expensive call and should be used only for
-/// cases which need all of this information.
-async fn fetch_managed_hosts_with_metadata(
+/// Get managed hosts with pagination. Fetches all machine IDs, slices to the
+/// requested page, then batch-fetches details only for that page.
+async fn fetch_managed_hosts_with_metadata_paginated(
     AxumState(api): AxumState<Arc<Api>>,
     include_history: bool,
-) -> eyre::Result<Vec<utils::ManagedHostOutput>> {
-    let machine_ids = api
+    params: &PaginationParams,
+) -> eyre::Result<(pagination::PaginationInfo, Vec<utils::ManagedHostOutput>)> {
+    let all_machine_ids = api
         .find_machine_ids(tonic::Request::new(forgerpc::MachineSearchConfig {
             include_dpus: true,
             include_predicted_host: true,
@@ -660,12 +715,14 @@ async fn fetch_managed_hosts_with_metadata(
         .into_inner()
         .machine_ids;
 
+    let (info, page_ids) = pagination::paginate_ids(&all_machine_ids, params);
+
     let mut all_machines = Vec::new();
     let mut offset = 0;
-    while offset != machine_ids.len() {
-        const PAGE_SIZE: usize = 100;
-        let page_size = PAGE_SIZE.min(machine_ids.len() - offset);
-        let next_ids = &machine_ids[offset..offset + page_size];
+    while offset != page_ids.len() {
+        const BATCH_SIZE: usize = 100;
+        let batch_size = BATCH_SIZE.min(page_ids.len() - offset);
+        let next_ids = &page_ids[offset..offset + batch_size];
         let request = tonic::Request::new(forgerpc::MachinesByIdsRequest {
             machine_ids: next_ids.to_vec(),
             include_history,
@@ -673,12 +730,68 @@ async fn fetch_managed_hosts_with_metadata(
         let next_machines = api.find_machines_by_ids(request).await?.into_inner();
 
         all_machines.extend(next_machines.machines.into_iter());
-        offset += page_size;
+        offset += batch_size;
     }
 
     let managed_host_metadata = ManagedHostMetadata::lookup_from_api(all_machines, api).await;
-    let managed_hosts = utils::get_managed_host_output(managed_host_metadata);
-    Ok(managed_hosts)
+    let mut managed_hosts = utils::get_managed_host_output(managed_host_metadata);
+    managed_hosts.sort_unstable_by(|h1, h2| h1.machine_id.cmp(&h2.machine_id));
+    Ok((info, managed_hosts))
+}
+
+struct ActiveFilters<'a> {
+    health_alerts: &'a str,
+    maintenance: &'a str,
+    vendor: &'a str,
+    model: &'a str,
+    state: &'a str,
+    gpu: &'a str,
+    ib: &'a str,
+    mem: isize,
+    time_in_state_above_sla: &'a str,
+    group_by: &'a str,
+}
+
+impl ActiveFilters<'_> {
+    /// Builds the `&key=value` pairs for active filters so pagination links
+    /// preserve the current filter state. Only non-default values are included.
+    fn to_query_params(&self) -> String {
+        let mut parts = Vec::new();
+        if self.health_alerts != "all" {
+            parts.push(format!("&health-alerts-filter={}", self.health_alerts));
+        }
+        if self.maintenance != "all" {
+            parts.push(format!("&maintenance-filter={}", self.maintenance));
+        }
+        if self.vendor != "all" {
+            parts.push(format!("&vendor-filter={}", self.vendor));
+        }
+        if self.model != "all" {
+            parts.push(format!("&model-filter={}", self.model));
+        }
+        if self.state != "all" {
+            parts.push(format!("&state-filter={}", self.state));
+        }
+        if self.gpu != "all" {
+            parts.push(format!("&gpu-filter={}", self.gpu));
+        }
+        if self.ib != "all" {
+            parts.push(format!("&ib-filter={}", self.ib));
+        }
+        if self.mem != -1 {
+            parts.push(format!("&mem-filter={}", self.mem));
+        }
+        if self.time_in_state_above_sla != "all" {
+            parts.push(format!(
+                "&time-in-state-above-sla-filter={}",
+                self.time_in_state_above_sla
+            ));
+        }
+        if self.group_by != "none" {
+            parts.push(format!("&group-by={}", self.group_by));
+        }
+        parts.join("")
+    }
 }
 
 /// View managed host details. This has been replaced by the Machine details page

@@ -19,12 +19,13 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::Json;
-use axum::extract::State as AxumState;
+use axum::extract::{Query, State as AxumState};
 use axum::response::{Html, IntoResponse};
 use hyper::http::StatusCode;
 use rpc::forge as forgerpc;
 
 use super::filters;
+use super::pagination::{self, PaginatedResponse, PaginationParams};
 use crate::api::Api;
 use crate::web::machine;
 
@@ -32,6 +33,16 @@ use crate::web::machine;
 #[template(path = "dpu_versions.html")]
 struct DpuVersions {
     machines: Vec<Row>,
+    path: String,
+    current_page: usize,
+    previous: usize,
+    next: usize,
+    pages: usize,
+    page_range_start: usize,
+    page_range_end: usize,
+    limit: usize,
+    total_items: usize,
+    extra_query_params: String,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -119,7 +130,10 @@ async fn fetch_dpus(api: &Arc<Api>) -> Result<Vec<Row>, tonic::Status> {
     Ok(machines)
 }
 
-pub async fn list_html(AxumState(state): AxumState<Arc<Api>>) -> impl IntoResponse {
+pub async fn list_html(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
     let machines = match fetch_dpus(&state).await {
         Ok(m) => m,
         Err(err) => {
@@ -128,11 +142,28 @@ pub async fn list_html(AxumState(state): AxumState<Arc<Api>>) -> impl IntoRespon
         }
     };
 
-    let tmpl = DpuVersions { machines };
+    let (info, machines) = pagination::paginate_vec(machines, &params);
+
+    let tmpl = DpuVersions {
+        machines,
+        path: "/admin/dpu-versions".to_string(),
+        current_page: info.current_page,
+        previous: info.previous,
+        next: info.next,
+        pages: info.pages,
+        page_range_start: info.page_range_start,
+        page_range_end: info.page_range_end,
+        limit: info.limit,
+        total_items: info.total_items,
+        extra_query_params: String::new(),
+    };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
-pub async fn list_json(AxumState(state): AxumState<Arc<Api>>) -> impl IntoResponse {
+pub async fn list_json(
+    AxumState(state): AxumState<Arc<Api>>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
     let machines = match fetch_dpus(&state).await {
         Ok(m) => m,
         Err(err) => {
@@ -141,5 +172,17 @@ pub async fn list_json(AxumState(state): AxumState<Arc<Api>>) -> impl IntoRespon
         }
     };
 
-    (StatusCode::OK, Json(machines)).into_response()
+    let (info, machines) = pagination::paginate_vec(machines, &params);
+
+    (
+        StatusCode::OK,
+        Json(PaginatedResponse {
+            items: machines,
+            current_page: info.current_page,
+            total_items: info.total_items,
+            total_pages: info.pages,
+            limit: info.limit,
+        }),
+    )
+        .into_response()
 }
