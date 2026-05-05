@@ -24,9 +24,9 @@ use axum::response::{Html, IntoResponse};
 use hyper::http::StatusCode;
 use rpc::forge as forgerpc;
 
+use super::Base;
 use super::filters;
 use super::pagination::{self, PaginatedResponse, PaginationParams};
-use super::Base;
 use crate::api::Api;
 use crate::web::machine;
 

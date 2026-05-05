@@ -165,17 +165,13 @@ pub async fn show_all_html(
     AxumState(api): AxumState<Arc<Api>>,
     Query(mut params): Query<HashMap<String, String>>,
 ) -> Response {
-    let active_tab = params
-        .remove("tab")
-        .unwrap_or_else(|| "all".to_string());
+    let active_tab = params.remove("tab").unwrap_or_else(|| "all".to_string());
     if !TABS.contains(&active_tab.as_str()) {
         return (StatusCode::BAD_REQUEST, "Unknown tab").into_response();
     }
 
     let pagination_params = PaginationParams {
-        current_page: params
-            .remove("current_page")
-            .and_then(|s| s.parse().ok()),
+        current_page: params.remove("current_page").and_then(|s| s.parse().ok()),
         limit: params.remove("limit").and_then(|s| s.parse().ok()),
     };
 
@@ -235,10 +231,7 @@ pub async fn show_all_html(
         _ => 0,
     };
 
-    let (info, _) = pagination::paginate_vec(
-        vec![0u8; active_tab_total],
-        &pagination_params,
-    );
+    let (info, _) = pagination::paginate_vec(vec![0u8; active_tab_total], &pagination_params);
 
     let paginate_tab = |items: Vec<ExpectedMachineRow>, tab: &str| -> Vec<ExpectedMachineRow> {
         if tab == active_tab {

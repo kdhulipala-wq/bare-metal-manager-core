@@ -32,9 +32,9 @@ use model::{self, machine};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc};
 
+use super::Base;
 use super::filters;
 use super::pagination::{self, PaginationParams};
-use super::Base;
 use crate::api::Api;
 
 const UNKNOWN: &str = "Unknown";
@@ -442,9 +442,7 @@ pub async fn show_html(
     let group_by = GroupingKey::params_to_vec(&group_by_param);
 
     let pagination_params = PaginationParams {
-        current_page: params
-            .remove("current_page")
-            .and_then(|s| s.parse().ok()),
+        current_page: params.remove("current_page").and_then(|s| s.parse().ok()),
         limit: params.remove("limit").and_then(|s| s.parse().ok()),
     };
 
@@ -536,7 +534,10 @@ pub async fn show_html(
 
     // Paginate the filtered result set (only for individual view, not grouped).
     let (info, hosts) = if grouped_hosts.is_some() {
-        let info = pagination::paginate_vec(Vec::<ManagedHostRowDisplay>::new(), &PaginationParams::default());
+        let info = pagination::paginate_vec(
+            Vec::<ManagedHostRowDisplay>::new(),
+            &PaginationParams::default(),
+        );
         (info.0, hosts)
     } else {
         pagination::paginate_vec(hosts, &pagination_params)
@@ -705,7 +706,10 @@ async fn fetch_managed_hosts_with_metadata_paginated(
     AxumState(api): AxumState<Arc<Api>>,
     include_history: bool,
     params: &PaginationParams,
-) -> eyre::Result<(pagination::PaginationInfo, Vec<carbide_utils::ManagedHostOutput>)> {
+) -> eyre::Result<(
+    pagination::PaginationInfo,
+    Vec<carbide_utils::ManagedHostOutput>,
+)> {
     let all_machine_ids = api
         .find_machine_ids(tonic::Request::new(forgerpc::MachineSearchConfig {
             include_dpus: true,

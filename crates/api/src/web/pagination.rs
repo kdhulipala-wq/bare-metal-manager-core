@@ -69,13 +69,17 @@ pub struct PaginatedResponse<T: Serialize> {
 /// A `limit` of `0` means "return all items" (backward compatibility).
 fn resolve_params(params: &PaginationParams) -> (usize, usize) {
     let current_page = params.current_page.unwrap_or(0);
-    let limit = params
-        .limit
-        .map_or(DEFAULT_PAGE_RECORD_LIMIT, |l| min(l, DEFAULT_PAGE_RECORD_LIMIT));
+    let limit = params.limit.map_or(DEFAULT_PAGE_RECORD_LIMIT, |l| {
+        min(l, DEFAULT_PAGE_RECORD_LIMIT)
+    });
     (current_page, limit)
 }
 
-fn compute_pagination_info(total_items: usize, current_page: usize, limit: usize) -> PaginationInfo {
+fn compute_pagination_info(
+    total_items: usize,
+    current_page: usize,
+    limit: usize,
+) -> PaginationInfo {
     let pages = if limit == 0 {
         if total_items == 0 { 0 } else { 1 }
     } else {
@@ -96,7 +100,10 @@ fn compute_pagination_info(total_items: usize, current_page: usize, limit: usize
 
 /// Paginate a slice of IDs. Returns pagination metadata and the IDs for the
 /// requested page. The caller should then batch-fetch details for only these IDs.
-pub fn paginate_ids<T: Clone>(all_ids: &[T], params: &PaginationParams) -> (PaginationInfo, Vec<T>) {
+pub fn paginate_ids<T: Clone>(
+    all_ids: &[T],
+    params: &PaginationParams,
+) -> (PaginationInfo, Vec<T>) {
     let (current_page, limit) = resolve_params(params);
     let total_items = all_ids.len();
 

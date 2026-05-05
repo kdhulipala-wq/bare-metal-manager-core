@@ -32,9 +32,9 @@ use rpc::site_explorer::{
 };
 use serde::Deserialize;
 
+use super::Base;
 use super::filters;
 use super::pagination::{self, PaginationParams};
-use super::Base;
 use crate::api::Api;
 use crate::web::action_status::{self, ActionStatus};
 
@@ -242,9 +242,7 @@ pub async fn show_html_all(
     };
 
     let pagination_params = PaginationParams {
-        current_page: params
-            .remove("current_page")
-            .and_then(|s| s.parse().ok()),
+        current_page: params.remove("current_page").and_then(|s| s.parse().ok()),
         limit: params.remove("limit").and_then(|s| s.parse().ok()),
     };
 
@@ -343,9 +341,7 @@ pub async fn show_html_unpaired(
     };
 
     let pagination_params = PaginationParams {
-        current_page: params
-            .remove("current_page")
-            .and_then(|s| s.parse().ok()),
+        current_page: params.remove("current_page").and_then(|s| s.parse().ok()),
         limit: params.remove("limit").and_then(|s| s.parse().ok()),
     };
 

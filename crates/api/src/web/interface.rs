@@ -27,9 +27,9 @@ use hyper::http::StatusCode;
 use rpc::forge as forgerpc;
 use rpc::forge::forge_server::Forge;
 
+use super::Base;
 use super::filters;
 use super::pagination::{self, PaginationParams};
-use super::Base;
 use crate::api::Api;
 
 #[derive(Template)]

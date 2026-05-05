@@ -31,10 +31,10 @@ use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc, HealthReportApplyMode, MachineInventorySoftwareComponent};
 use serde::Deserialize;
 
+use super::Base;
 use super::filters;
 use super::pagination::{self, PaginationParams};
 use super::state_history::StateHistoryTable;
-use super::Base;
 use crate::api::Api;
 use crate::web::action_status::{self, ActionStatus};
 
