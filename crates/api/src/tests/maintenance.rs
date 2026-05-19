@@ -68,7 +68,8 @@ async fn test_maintenance(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
             tenant_message: None,
             classifications: vec![
                 "PreventAllocations".to_string(),
-                "SuppressExternalAlerting".to_string()
+                "SuppressExternalAlerting".to_string(),
+                "ExcludeFromStateMachineSla".to_string(),
             ]
         }
     );
