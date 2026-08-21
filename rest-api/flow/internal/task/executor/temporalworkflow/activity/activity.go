@@ -217,14 +217,24 @@ func (a *Activities) DecommissionControl(
 
 // GetDecommissionStatusResult is the result of the GetDecommissionStatus activity.
 type GetDecommissionStatusResult struct {
-	// States maps each component ID to its current raw decommission state
+	// States maps each found component ID to its current raw decommission state
 	// string as returned by the component manager (e.g. "Decommissioning/...",
-	// "Decommissioned", "Failed/...").
+	// "Decommissioned", "Failed/..."). Only IDs that Core returned a record for
+	// are present here.
 	States map[string]string
+	// NotFound holds component IDs that Core has no record of. This happens
+	// when Core removes the resource record as the terminal decommission step,
+	// but can also occur for unknown/mistyped IDs. The workflow logs these at
+	// Warn level and treats them as terminal, since there is no API signal to
+	// distinguish the two cases. A TODO is left to add an explicit
+	// "Decommissioned" state or a found/not-found flag to the Core API.
+	NotFound []string
 }
 
 // GetDecommissionStatus returns the decommission state for target components.
 // This activity is designed to be called repeatedly in a polling loop.
+// Component IDs that Core has no record of are returned in NotFound rather
+// than as empty strings in States, so the caller can distinguish them.
 func (a *Activities) GetDecommissionStatus(
 	ctx context.Context,
 	target common.Target,
@@ -234,12 +244,22 @@ func (a *Activities) GetDecommissionStatus(
 		return nil, err
 	}
 
-	states, err := reader.GetDecommissionStatus(ctx, target)
+	rawStates, err := reader.GetDecommissionStatus(ctx, target)
 	if err != nil {
 		return nil, err
 	}
 
-	return &GetDecommissionStatusResult{States: states}, nil
+	result := &GetDecommissionStatusResult{
+		States: make(map[string]string, len(rawStates)),
+	}
+	for id, state := range rawStates {
+		if state == "" {
+			result.NotFound = append(result.NotFound, id)
+		} else {
+			result.States[id] = state
+		}
+	}
+	return result, nil
 }
 
 // VerifyFirmwareConsistency checks that all target components report the
