@@ -62,6 +62,19 @@ func shortDecommissionConfig() operationrules.ActionConfig {
 	}
 }
 
+func TestEvaluateDecommissionResult_ManagedHostTerminalState(t *testing.T) {
+	result := &activitypkg.GetDecommissionStatusResult{
+		States: map[string]string{
+			"comp-1": "Decommissioning/Decommissioned",
+		},
+	}
+
+	done, err := evaluateDecommissionResult(result)
+
+	assert.NoError(t, err)
+	assert.True(t, done)
+}
+
 // TestWaitDecommissioned_AllNotFound verifies that when the preflight confirms
 // all IDs are known and the first poll returns all IDs as NotFound (Core
 // removed the records), the workflow completes successfully.

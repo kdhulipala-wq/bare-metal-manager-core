@@ -820,7 +820,7 @@ func evaluateDecommissionResult(result *activity.GetDecommissionStatusResult) (b
 	inProgress := false
 	for componentID, state := range result.States {
 		switch {
-		case state == "Decommissioned":
+		case state == "Decommissioned", state == "Decommissioning/Decommissioned":
 			// Terminal success — keep scanning.
 		case strings.HasPrefix(state, "Decommissioning/"):
 			log.Debug().
