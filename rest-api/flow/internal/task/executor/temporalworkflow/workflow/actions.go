@@ -659,14 +659,10 @@ const maxConsecutiveFailureDuration = 5 * time.Minute
 // components reach terminal state. States beginning with "Decommissioning/"
 // are in-progress; any other non-terminal state is a hard failure.
 //
-// Contract: a preflight status call is made before the poll loop. Any
-// component that is NotFound at preflight time is treated as an unknown or
-// mistyped ID and causes an immediate error. Later NotFound results also fail
-// closed because lookup absence is not an explicit terminal signal.
-//
 // Consecutive GetDecommissionStatus errors are tracked by elapsed time; after
 // maxConsecutiveFailureDuration the loop aborts rather than spinning until the
-// deadline. Uses config.Timeout and config.PollInterval.
+// deadline. The initial status call uses the same failure budget as subsequent
+// polls. Uses config.Timeout and config.PollInterval.
 func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 	ctx := actx.workflowContext
 	target := actx.target
@@ -680,7 +676,7 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 		pollInterval = 30 * time.Second
 	}
 
-	// Establish the deadline before any activity so preflight time is charged
+	// Establish the deadline before any activity so initial status time is charged
 	// against config.Timeout and cannot extend the total action duration.
 	deadline := workflow.Now(ctx).Add(timeout)
 
@@ -707,29 +703,8 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 		}
 	}
 
-	// Preflight: confirm all target IDs are known to Core. Core must still
-	// hold every record immediately after DecommissionControl has run, so any
-	// NotFound entry here indicates an unknown or mistyped component ID.
-	preflightCtx := workflow.WithActivityOptions(ctx, activityOpts())
-	var preflightResult activity.GetDecommissionStatusResult
-	if err := workflow.ExecuteActivity(
-		preflightCtx, activity.NameGetDecommissionStatus, target,
-	).Get(preflightCtx, &preflightResult); err != nil {
-		return fmt.Errorf("preflight decommission status check failed: %w", err)
-	}
-	if len(preflightResult.NotFound) > 0 {
-		return fmt.Errorf(
-			"component IDs not found in Core immediately after decommission was initiated — unknown or mistyped IDs: %v",
-			preflightResult.NotFound,
-		)
-	}
-	if done, err := evaluateDecommissionResult(&preflightResult); err != nil {
-		return err
-	} else if done {
-		log.Info().Int("count", len(preflightResult.States)).Msg("All components decommissioned")
-		return nil
-	}
 	var firstFailureAt time.Time
+	firstPoll := true
 
 	for {
 		if workflow.Now(ctx).After(deadline) {
@@ -738,22 +713,26 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 			)
 		}
 
-		// Cap the sleep to the remaining deadline so a large PollInterval
-		// cannot push the actual timeout past the configured bound.
-		sleep := pollInterval
-		if remaining := deadline.Sub(workflow.Now(ctx)); sleep > remaining {
-			sleep = remaining
-		}
-		if err := workflow.Sleep(ctx, sleep); err != nil {
-			return fmt.Errorf("workflow sleep interrupted: %w", err)
-		}
+		if firstPoll {
+			firstPoll = false
+		} else {
+			// Cap the sleep to the remaining deadline so a large PollInterval
+			// cannot push the actual timeout past the configured bound.
+			sleep := pollInterval
+			if remaining := deadline.Sub(workflow.Now(ctx)); sleep > remaining {
+				sleep = remaining
+			}
+			if err := workflow.Sleep(ctx, sleep); err != nil {
+				return fmt.Errorf("workflow sleep interrupted: %w", err)
+			}
 
-		// Recheck after sleep using >= so that a capped sleep that lands exactly
-		// on the deadline also terminates rather than firing one more activity.
-		if !workflow.Now(ctx).Before(deadline) {
-			return fmt.Errorf(
-				"timed out waiting for decommission to complete (timeout %v)", timeout,
-			)
+			// Recheck after sleep using >= so that a capped sleep that lands exactly
+			// on the deadline also terminates rather than firing one more activity.
+			if !workflow.Now(ctx).Before(deadline) {
+				return fmt.Errorf(
+					"timed out waiting for decommission to complete (timeout %v)", timeout,
+				)
+			}
 		}
 
 		// Use a short fire-once policy so a hung status call fails quickly
