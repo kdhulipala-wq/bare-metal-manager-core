@@ -75,9 +75,15 @@ func TestEvaluateDecommissionResult_ManagedHostTerminalState(t *testing.T) {
 	assert.True(t, done)
 }
 
-// TestWaitDecommissioned_AllNotFound verifies that when the preflight confirms
-// all IDs are known and the first poll returns all IDs as NotFound (Core
-// removed the records), the workflow completes successfully.
+func TestEvaluateDecommissionResult_EmptyResultFails(t *testing.T) {
+	done, err := evaluateDecommissionResult(&activitypkg.GetDecommissionStatusResult{})
+
+	assert.ErrorContains(t, err, "status result is empty")
+	assert.False(t, done)
+}
+
+// TestWaitDecommissioned_AllNotFound verifies that a later ambiguous lookup
+// result cannot be inferred as successful decommissioning.
 func TestWaitDecommissioned_AllNotFound(t *testing.T) {
 	suite := &testsuite.WorkflowTestSuite{}
 	env := suite.NewTestWorkflowEnvironment()
@@ -92,7 +98,7 @@ func TestWaitDecommissioned_AllNotFound(t *testing.T) {
 			},
 		}, nil).Once()
 
-	// First poll: Core removed both records.
+	// First poll: neither component has a usable status.
 	env.OnActivity(activitypkg.NameGetDecommissionStatus, mock.Anything, mock.Anything).
 		Return(&activitypkg.GetDecommissionStatusResult{
 			NotFound: []string{"comp-1", "comp-2"},
@@ -101,12 +107,14 @@ func TestWaitDecommissioned_AllNotFound(t *testing.T) {
 	env.ExecuteWorkflow(runWaitDecommissionedWorkflow, decommissionTestTarget(), shortDecommissionConfig())
 
 	assert.True(t, env.IsWorkflowCompleted())
-	assert.NoError(t, env.GetWorkflowError())
+	err := env.GetWorkflowError()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "comp-1")
+	assert.Contains(t, err.Error(), "comp-2")
 }
 
-// TestWaitDecommissioned_Mixed verifies that a poll result combining an
-// explicit "Decommissioned" state and a NotFound entry (record removed by
-// Core) is treated as fully complete.
+// TestWaitDecommissioned_Mixed verifies that an explicit terminal state cannot
+// mask another component whose status is unavailable.
 func TestWaitDecommissioned_Mixed(t *testing.T) {
 	suite := &testsuite.WorkflowTestSuite{}
 	env := suite.NewTestWorkflowEnvironment()
@@ -121,7 +129,7 @@ func TestWaitDecommissioned_Mixed(t *testing.T) {
 			},
 		}, nil).Once()
 
-	// First poll: comp-1 reached Decommissioned; comp-2 record was removed.
+	// First poll: comp-1 reached Decommissioned; comp-2 has no usable status.
 	env.OnActivity(activitypkg.NameGetDecommissionStatus, mock.Anything, mock.Anything).
 		Return(&activitypkg.GetDecommissionStatusResult{
 			States:   map[string]string{"comp-1": "Decommissioned"},
@@ -131,13 +139,14 @@ func TestWaitDecommissioned_Mixed(t *testing.T) {
 	env.ExecuteWorkflow(runWaitDecommissionedWorkflow, decommissionTestTarget(), shortDecommissionConfig())
 
 	assert.True(t, env.IsWorkflowCompleted())
-	assert.NoError(t, env.GetWorkflowError())
+	err := env.GetWorkflowError()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "comp-2")
 }
 
 // TestWaitDecommissioned_UnknownID verifies that a component absent from Core
 // on the preflight call causes an immediate error rather than polling until
-// timeout. This distinguishes a mistyped or unregistered ID from a record that
-// Core removed as its terminal decommission step.
+// timeout.
 func TestWaitDecommissioned_UnknownID(t *testing.T) {
 	suite := &testsuite.WorkflowTestSuite{}
 	env := suite.NewTestWorkflowEnvironment()

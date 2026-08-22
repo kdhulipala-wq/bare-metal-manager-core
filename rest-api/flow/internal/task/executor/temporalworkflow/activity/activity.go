@@ -222,19 +222,16 @@ type GetDecommissionStatusResult struct {
 	// "Decommissioned", "Failed/..."). Only IDs that Core returned a record for
 	// are present here.
 	States map[string]string
-	// NotFound holds component IDs that Core has no record of. This happens
-	// when Core removes the resource record as the terminal decommission step,
-	// but can also occur for unknown/mistyped IDs. The workflow logs these at
-	// Warn level and treats them as terminal, since there is no API signal to
-	// distinguish the two cases. A TODO is left to add an explicit
-	// "Decommissioned" state or a found/not-found flag to the Core API.
+	// NotFound holds component IDs for which the reader could not return a
+	// usable state. This can mean the record is absent or that its state was
+	// omitted; it is not a terminal-success signal.
 	NotFound []string
 }
 
 // GetDecommissionStatus returns the decommission state for target components.
 // This activity is designed to be called repeatedly in a polling loop.
-// Component IDs that Core has no record of are returned in NotFound rather
-// than as empty strings in States, so the caller can distinguish them.
+// Component IDs with an empty state are returned in NotFound rather than as
+// empty strings in States, so the caller can reject the ambiguous result.
 func (a *Activities) GetDecommissionStatus(
 	ctx context.Context,
 	target common.Target,

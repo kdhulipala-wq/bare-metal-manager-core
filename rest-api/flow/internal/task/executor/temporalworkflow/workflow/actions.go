@@ -5,6 +5,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -660,10 +661,8 @@ const maxConsecutiveFailureDuration = 5 * time.Minute
 //
 // Contract: a preflight status call is made before the poll loop. Any
 // component that is NotFound at preflight time is treated as an unknown or
-// mistyped ID and causes an immediate error, because Core must still hold the
-// record immediately after DecommissionControl has run. After the preflight
-// passes, a NotFound response means Core removed the record as its terminal
-// decommission step and is treated as success.
+// mistyped ID and causes an immediate error. Later NotFound results also fail
+// closed because lookup absence is not an explicit terminal signal.
 //
 // Consecutive GetDecommissionStatus errors are tracked by elapsed time; after
 // maxConsecutiveFailureDuration the loop aborts rather than spinning until the
@@ -711,8 +710,6 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 	// Preflight: confirm all target IDs are known to Core. Core must still
 	// hold every record immediately after DecommissionControl has run, so any
 	// NotFound entry here indicates an unknown or mistyped component ID.
-	// After this check passes, NotFound in the poll loop reliably means Core
-	// removed the record as its terminal decommission step.
 	preflightCtx := workflow.WithActivityOptions(ctx, activityOpts())
 	var preflightResult activity.GetDecommissionStatusResult
 	if err := workflow.ExecuteActivity(
@@ -787,13 +784,6 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 		}
 		firstFailureAt = time.Time{} // reset on success
 
-		// NotFound after the preflight means Core removed the record — terminal.
-		for _, id := range result.NotFound {
-			log.Debug().
-				Str("component_id", id).
-				Msg("Component record removed by Core; treating as decommissioned")
-		}
-
 		done, err := evaluateDecommissionResult(&result)
 		if err != nil {
 			return err
@@ -801,7 +791,6 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 		if done {
 			log.Info().
 				Int("states_count", len(result.States)).
-				Int("removed_count", len(result.NotFound)).
 				Msg("All components decommissioned")
 			return nil
 		}
@@ -811,12 +800,23 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 // evaluateDecommissionResult inspects a GetDecommissionStatusResult and
 // returns (true, nil) when every component is terminal, (false, nil) when
 // polling should continue, and (false, err) on a hard failure state.
-// NotFound entries count as terminal (Core removed the record).
+// NotFound entries are ambiguous and fail closed rather than being inferred as
+// terminal success.
 //
 // All entries are inspected before returning so that a hard-failure state is
 // never masked by an in-progress state that happened to be iterated first
 // (Go map iteration is unordered).
 func evaluateDecommissionResult(result *activity.GetDecommissionStatusResult) (bool, error) {
+	if len(result.States) == 0 && len(result.NotFound) == 0 {
+		return false, errors.New("decommission status result is empty")
+	}
+	if len(result.NotFound) > 0 {
+		return false, fmt.Errorf(
+			"decommission status unavailable for component IDs: %v",
+			result.NotFound,
+		)
+	}
+
 	inProgress := false
 	for componentID, state := range result.States {
 		switch {
