@@ -656,8 +656,10 @@ func executeDecommissionControlAction(actx actionExecutionContext) error {
 const maxConsecutiveFailureDuration = 5 * time.Minute
 
 // executeWaitDecommissionedAction polls GetDecommissionStatus until all
-// components reach terminal state. States beginning with "Decommissioning/"
-// are in-progress; any other non-terminal state is a hard failure.
+// components reach terminal state. Ready and the managed-host maintenance
+// states are pending because Core records the request before its controller
+// transitions the host; states beginning with "Decommissioning/" are also in
+// progress. Any other non-terminal state is a hard failure.
 //
 // Consecutive GetDecommissionStatus errors are tracked by elapsed time; after
 // maxConsecutiveFailureDuration the loop aborts rather than spinning until the
@@ -801,6 +803,15 @@ func evaluateDecommissionResult(result *activity.GetDecommissionStatusResult) (b
 		switch {
 		case state == "Decommissioned", state == "Decommissioning/Decommissioned":
 			// Terminal success — keep scanning.
+		case state == "Ready", strings.HasPrefix(state, "Maintenance("):
+			// Core commits decommission_requested before its asynchronous
+			// controller transitions the managed host out of Ready. A pending
+			// maintenance request takes precedence without clearing that flag.
+			log.Debug().
+				Str("component_id", componentID).
+				Str("state", state).
+				Msg("Component has an accepted decommission request that is pending")
+			inProgress = true
 		case strings.HasPrefix(state, "Decommissioning/"):
 			log.Debug().
 				Str("component_id", componentID).

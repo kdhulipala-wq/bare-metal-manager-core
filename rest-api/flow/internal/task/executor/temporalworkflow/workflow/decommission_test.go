@@ -82,6 +82,38 @@ func TestEvaluateDecommissionResult_EmptyResultFails(t *testing.T) {
 	assert.False(t, done)
 }
 
+func TestEvaluateDecommissionResult_AcceptedPendingStates(t *testing.T) {
+	for _, state := range []string{
+		"Ready",
+		"Maintenance(PowerOn)",
+		"Maintenance(PowerOff)",
+		"Maintenance(Reset)",
+		"Maintenance(FutureOperation)",
+	} {
+		t.Run(state, func(t *testing.T) {
+			result := &activitypkg.GetDecommissionStatusResult{
+				States: map[string]string{"comp-1": state},
+			}
+
+			done, err := evaluateDecommissionResult(result)
+
+			assert.NoError(t, err)
+			assert.False(t, done)
+		})
+	}
+}
+
+func TestEvaluateDecommissionResult_UnexpectedStateFails(t *testing.T) {
+	result := &activitypkg.GetDecommissionStatusResult{
+		States: map[string]string{"comp-1": "Failed/maintenance failed"},
+	}
+
+	done, err := evaluateDecommissionResult(result)
+
+	assert.Error(t, err)
+	assert.False(t, done)
+}
+
 // TestWaitDecommissioned_AllNotFound verifies that a later ambiguous lookup
 // result cannot be inferred as successful decommissioning.
 func TestWaitDecommissioned_AllNotFound(t *testing.T) {
@@ -177,6 +209,56 @@ func TestWaitDecommissioned_InitialStatusErrorRecovers(t *testing.T) {
 	env.OnActivity(activitypkg.NameGetDecommissionStatus, mock.Anything, mock.Anything).
 		Return(nil, errors.New("Core unreachable")).Once()
 	// A later lookup recovers and reports the actual managed-host terminal state.
+	env.OnActivity(activitypkg.NameGetDecommissionStatus, mock.Anything, mock.Anything).
+		Return(&activitypkg.GetDecommissionStatusResult{
+			States: map[string]string{
+				"comp-1": "Decommissioning/Decommissioned",
+				"comp-2": "Decommissioning/Decommissioned",
+			},
+		}, nil).Once()
+
+	env.ExecuteWorkflow(runWaitDecommissionedWorkflow, decommissionTestTarget(), shortDecommissionConfig())
+
+	assert.True(t, env.IsWorkflowCompleted())
+	assert.NoError(t, env.GetWorkflowError())
+}
+
+// TestWaitDecommissioned_AcceptedRequestPending verifies that the status poll
+// tolerates Ready and prioritized maintenance while Core retains an accepted
+// decommission request, then observes the asynchronous controller transition.
+func TestWaitDecommissioned_AcceptedRequestPending(t *testing.T) {
+	suite := &testsuite.WorkflowTestSuite{}
+	env := suite.NewTestWorkflowEnvironment()
+	registerDecommissionActivities(env)
+
+	env.OnActivity(activitypkg.NameGetDecommissionStatus, mock.Anything, mock.Anything).
+		Return(&activitypkg.GetDecommissionStatusResult{
+			States: map[string]string{
+				"comp-1": "Ready",
+				"comp-2": "Ready",
+			},
+		}, nil).Once()
+	env.OnActivity(activitypkg.NameGetDecommissionStatus, mock.Anything, mock.Anything).
+		Return(&activitypkg.GetDecommissionStatusResult{
+			States: map[string]string{
+				"comp-1": "Maintenance(Reset)",
+				"comp-2": "Maintenance(Reset)",
+			},
+		}, nil).Once()
+	env.OnActivity(activitypkg.NameGetDecommissionStatus, mock.Anything, mock.Anything).
+		Return(&activitypkg.GetDecommissionStatusResult{
+			States: map[string]string{
+				"comp-1": "Ready",
+				"comp-2": "Ready",
+			},
+		}, nil).Once()
+	env.OnActivity(activitypkg.NameGetDecommissionStatus, mock.Anything, mock.Anything).
+		Return(&activitypkg.GetDecommissionStatusResult{
+			States: map[string]string{
+				"comp-1": "Decommissioning/SuppressingSiteExplorer",
+				"comp-2": "Decommissioning/SuppressingSiteExplorer",
+			},
+		}, nil).Once()
 	env.OnActivity(activitypkg.NameGetDecommissionStatus, mock.Anything, mock.Anything).
 		Return(&activitypkg.GetDecommissionStatusResult{
 			States: map[string]string{
