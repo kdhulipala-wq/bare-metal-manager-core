@@ -229,12 +229,26 @@ pub async fn find_all(txn: impl DbReader<'_>) -> Result<Vec<ExploredEndpoint>, D
 /// LastExplorationError is completely nonexistent it is NULL; if it is there
 /// and indicates a null value it is 'null'.
 ///
+/// One exception: an in-flight BFB platform power cycle in its `poweron` or
+/// `waitingfordpubmc` phase stays eligible despite a pending refresh or a
+/// transient connectivity error from the DPU BMC. The DPU BMC is unreachable
+/// while the host is off, and the pending host PowerOn is what restores it, so
+/// gating on a successful exploration would deadlock. Other errors
+/// (authentication, credentials, vendor, ...) still exclude the row.
+///
 /// [`find_preingest_not_waiting_not_error`] and
 /// [`count_preingest_not_waiting_not_error`] both build their queries from
 /// this, so the row-returning and counting variants cannot drift apart.
 const PREINGEST_NOT_WAITING_NOT_ERROR_WHERE: &str = "(preingestion_state IS NULL OR preingestion_state->'state' != '\"complete\"')
-                            AND waiting_for_explorer_refresh = false
-                            AND (exploration_report->'LastExplorationError' IS NULL OR exploration_report->'LastExplorationError' = 'null')";
+                            AND (
+                                (waiting_for_explorer_refresh = false
+                                    AND (exploration_report->'LastExplorationError' IS NULL OR exploration_report->'LastExplorationError' = 'null'))
+                                OR (preingestion_state->>'state' = 'bfbplatformpowercycle'
+                                    AND preingestion_state->>'phase' IN ('poweron', 'waitingfordpubmc')
+                                    AND (exploration_report->'LastExplorationError' IS NULL
+                                        OR exploration_report->'LastExplorationError' = 'null'
+                                        OR exploration_report->'LastExplorationError'->>'Type' IN ('ConnectionRefused', 'ConnectionTimeout', 'Unreachable')))
+                            )";
 
 /// find_preingest_not_waiting gets everything that is still in preingestion that isn't waiting for site explorer to refresh it again and isn't in an error state.
 pub async fn find_preingest_not_waiting_not_error(
@@ -1437,6 +1451,129 @@ mod tests {
         assert_eq!(rows.len(), 3, "three endpoints match the predicate");
         assert_eq!(count, 3, "count agrees with the row count");
         assert_eq!(count, rows.len() as i64);
+    }
+
+    /// An in-flight BFB platform power cycle past `PowerOff` stays selectable
+    /// despite a pending refresh and a transient DPU connectivity error; every
+    /// other errored or waiting endpoint stays excluded.
+    #[crate::sqlx_test]
+    async fn bfb_powercycle_selected_despite_transient_dpu_error(pool: sqlx::PgPool) {
+        use model::site_explorer::BfbPlatformPowercyclePhase as Phase;
+
+        let powercycle = |phase| PreingestionState::BfbPlatformPowercycle {
+            host_bmc_ip: "10.9.9.9".parse().unwrap(),
+            dpu_bmc_mac: None,
+            phase,
+            post_install: true,
+        };
+        let refused = || EndpointExplorationError::ConnectionRefused {
+            details: "refused".to_string(),
+        };
+        let unauthorized = || EndpointExplorationError::Unauthorized {
+            details: "bad creds".to_string(),
+            response_body: None,
+            response_code: Some(401),
+        };
+
+        // (address, state, error, waiting_for_explorer_refresh, expected selected)
+        let cases: Vec<(
+            &str,
+            PreingestionState,
+            Option<EndpointExplorationError>,
+            bool,
+            bool,
+        )> = vec![
+            (
+                "10.0.7.1",
+                powercycle(Phase::PowerOn),
+                Some(refused()),
+                true,
+                true,
+            ),
+            (
+                "10.0.7.2",
+                powercycle(Phase::WaitingForDpuBmc),
+                Some(refused()),
+                true,
+                true,
+            ),
+            ("10.0.7.3", powercycle(Phase::PowerOn), None, true, true),
+            (
+                "10.0.7.4",
+                powercycle(Phase::PowerOff),
+                Some(refused()),
+                true,
+                false,
+            ),
+            (
+                "10.0.7.5",
+                powercycle(Phase::PowerOn),
+                Some(unauthorized()),
+                true,
+                false,
+            ),
+            (
+                "10.0.7.6",
+                PreingestionState::RecheckVersions,
+                Some(refused()),
+                true,
+                false,
+            ),
+            (
+                "10.0.7.7",
+                PreingestionState::RecheckVersions,
+                None,
+                true,
+                false,
+            ),
+            (
+                "10.0.7.8",
+                PreingestionState::RecheckVersions,
+                None,
+                false,
+                true,
+            ),
+        ];
+
+        let mut txn = pool.begin().await.unwrap();
+        for (addr, state, error, waiting, _) in &cases {
+            let report = EndpointExplorationReport {
+                last_exploration_error: error.clone(),
+                ..Default::default()
+            };
+            sqlx::query(
+                "INSERT INTO explored_endpoints (address, exploration_report, version, preingestion_state, waiting_for_explorer_refresh) \
+                 VALUES ($1::inet, $2, 'V1-T1733777281821769', $3, $4)",
+            )
+            .bind(addr)
+            .bind(sqlx::types::Json(report))
+            .bind(sqlx::types::Json(state))
+            .bind(waiting)
+            .execute(&mut *txn)
+            .await
+            .unwrap();
+        }
+
+        let mut selected: Vec<String> = find_preingest_not_waiting_not_error(&mut *txn)
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.address.to_string())
+            .collect();
+        selected.sort();
+        let mut expected: Vec<String> = cases
+            .iter()
+            .filter(|c| c.4)
+            .map(|c| c.0.to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(selected, expected);
+        assert_eq!(
+            count_preingest_not_waiting_not_error(&mut *txn)
+                .await
+                .unwrap(),
+            expected.len() as i64
+        );
     }
 
     /// `count_preingest_installing` returns the same tally as

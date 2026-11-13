@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_preingestion_manager::PreingestionManager;
+use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
@@ -358,6 +359,108 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
             "{boundary}"
         );
     }
+}
+
+/// A DPU exploration failure recorded after host ForceOff must not strand the
+/// pending host PowerOn: the BMC is unreachable only because the host is off.
+#[crate::sqlx_test]
+async fn bfb_powercycle_completes_despite_dpu_exploration_error(pool: sqlx::PgPool) {
+    use model::site_explorer::{BfbPlatformPowercyclePhase, EndpointExplorationError};
+
+    let env = create_test_env(pool).await;
+    let dpu_ip = seed_pair(&env).await;
+    env.api
+        .copy_bfb_to_dpu_rshim(request(dpu_ip, Some(DPU_MAC), false))
+        .await
+        .unwrap();
+
+    // BFB installed and ForceOff succeeded: the persisted phase is PowerOn.
+    let mut txn = env.pool.begin().await.unwrap();
+    db::explored_endpoints::set_preingestion_bfb_platform_powercycle(
+        dpu_ip,
+        HOST_BMC_IP,
+        BfbPlatformPowercyclePhase::PowerOn,
+        true,
+        Some(DPU_MAC.parse().unwrap()),
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Site Explorer then records a failure; set_error persists the error and
+    // sets waiting_for_explorer_refresh.
+    let record_error = |error: EndpointExplorationError| {
+        let env = &env;
+        async move {
+            let version = fetch(env, dpu_ip).await.report_version;
+            let mut txn = env.pool.begin().await.unwrap();
+            db::explored_endpoints::try_update_last_exploration_error(
+                dpu_ip,
+                version,
+                &error,
+                Duration::from_secs(1),
+                &mut txn,
+            )
+            .await
+            .unwrap();
+            txn.commit().await.unwrap();
+        }
+    };
+
+    // A non-transient error keeps the endpoint excluded: nothing is dispatched.
+    record_error(EndpointExplorationError::Unauthorized {
+        details: "bad credentials".to_string(),
+        response_body: None,
+        response_code: Some(401),
+    })
+    .await;
+    let before = env.redfish_sim.timepoint();
+    manager(&env, None).run_single_iteration().await.unwrap();
+    assert!(
+        env.redfish_sim
+            .actions_since(&before)
+            .all_hosts()
+            .is_empty()
+    );
+    assert!(matches!(
+        fetch(&env, dpu_ip).await.preingestion_state,
+        PreingestionState::BfbPlatformPowercycle {
+            phase: BfbPlatformPowercyclePhase::PowerOn,
+            ..
+        }
+    ));
+
+    // A transient connectivity error with the refresh wait pending does not.
+    record_error(EndpointExplorationError::ConnectionRefused {
+        details: "host is off".to_string(),
+    })
+    .await;
+    let dpu = fetch(&env, dpu_ip).await;
+    assert!(dpu.waiting_for_explorer_refresh);
+    assert!(dpu.report.last_exploration_error.is_some());
+
+    let before = env.redfish_sim.timepoint();
+    manager(&env, None).run_single_iteration().await.unwrap();
+    assert_eq!(
+        env.redfish_sim.actions_since(&before).all_hosts(),
+        vec![RedfishSimAction::Power(libredfish::SystemPowerControl::On)]
+    );
+    assert!(matches!(
+        fetch(&env, dpu_ip).await.preingestion_state,
+        PreingestionState::BfbPlatformPowercycle {
+            phase: BfbPlatformPowercyclePhase::WaitingForDpuBmc,
+            ..
+        }
+    ));
+
+    // The DPU BMC answers again: the workflow completes and releases the hold.
+    manager(&env, None).run_single_iteration().await.unwrap();
+    assert_eq!(
+        fetch(&env, dpu_ip).await.preingestion_state,
+        PreingestionState::Complete
+    );
+    assert!(!fetch(&env, HOST_BMC_IP).await.pause_remediation);
 }
 
 struct CredentialRecorder(tokio::sync::mpsc::UnboundedSender<CredentialKey>);
